@@ -1,0 +1,237 @@
+redColor='\e[1;31m'
+yellowColor='\e[1;32m'
+
+get_string_sum(){
+  echo "$1" | md5sum | awk '{print $1}'
+}
+
+get_file_sum(){
+  md5sum "$1" | awk '{print $1}'
+}
+
+
+get_divided_path(){
+  echo "$(echo "$1" | cut -b -2)/$(echo "$1" | cut -b 3-)"
+}
+
+add_file() {
+  if [ "$2" ]; then
+      delete_from_index "$1"
+  fi
+
+  sum=$(get_divided_path "$(get_file_sum "$1")")
+
+  if [ ! -f "git/objects/$sum" ]; then
+        cp "$1" git/objects/tmp
+        mkdir -p git/objects/"$(echo "$sum" | cut -b -2)"
+        zlib-flate -compress=6 <git/objects/tmp> "git/objects/$sum"
+        rm git/objects/tmp
+  fi
+  echo "$1:$sum" >> git/index
+}
+
+
+delete_from_index(){
+  value=$(grep -Ev ^"$1" git/index)
+  if [ "$value" ]; then
+    echo "$value" > git/index
+  else
+    echo -n "" | tee git/index
+  fi
+
+}
+
+add_dir(){
+  delete_from_index "$1"
+  while IFS= read -r -d '' filepath
+  do
+     add_file "$filepath"
+  done < <(find "$1" -type f -print0)
+}
+
+add_all(){
+  delete_from_index ""
+  for path in *; do
+    if [ -d "$path" ] && [ $"$path" != "git" ]; then
+      add_dir "$path"
+    elif [ -f "$path" ]; then
+      add_file "$path"
+    fi
+  done
+}
+
+
+make_tree(){
+  declare -A treeHashArray
+  declare -A blobHashArray
+  while IFS= read -r line
+  do
+    declare prefix
+    declare postfix
+    IFS='/' read -r prefix postfix <<< "$line"
+
+    if [[ $postfix ]]
+    then
+       treeHashArray+=([$prefix]="$(make_tree "$1$prefix/")")
+    else
+       blobHashArray+=([$prefix]="$(grep -oP ^"$1$prefix\:\K.*" git/index)")
+    fi
+  done < <(grep -oP ^"$1\K.*" git/index | awk '{split($0,a,":"); print a[1]}')
+
+  for x in "${!blobHashArray[@]}" ; do
+    echo "blob:${blobHashArray[$x]}:$x" >> git/objects/tmp
+  done
+
+  for x in "${!treeHashArray[@]}" ; do
+    echo "tree:${treeHashArray[$x]}:$x" >> git/objects/tmp
+  done
+
+  sort -o git/objects/tmp git/objects/tmp
+  sum=$(get_divided_path "$(get_file_sum git/objects/tmp)")
+  mkdir -p git/objects/"$(echo "$sum" | cut -b -2)"
+  mv git/objects/tmp git/objects/"$sum"
+  echo "$sum"
+}
+
+perform_checkout(){
+  declare type
+  declare hash
+  declare name
+  while read -r line; do
+    IFS=':' read -r type hash name <<< "$line"
+    if [ "$type" == "tree" ]; then
+        mkdir "$2"/"$name"
+        perform_checkout "$hash" "$2/$name"
+    elif [ "$type" == "blob" ]; then
+        zlib-flate -uncompress <git/objects/"$hash"> "$2/$name"
+    fi
+  done < git/objects/"$1"
+}
+
+function get_diff() {
+    diff -ruN --exclude=git "$1" "$2"
+}
+
+# Начало программы
+key=$1
+value=$2
+case $key in
+  "init")
+    if [ -d git ]; then
+      echo git folder already exists in "$(pwd)"/git
+    else
+      echo Initialized empty git repository in "$(pwd)"
+      mkdir -p git/objects git/commits
+      touch git/index git/commits/HEAD git/commits/master
+    fi
+  ;;
+  "add")
+    value=$(echo $value | sed "s#./##")
+    if [ "$value" == "-A" ]; then
+        add_all
+    elif [ -f "$value" ]; then
+        add_file "$value" "truncate_first"
+    elif [ -d "$value" ]; then
+        add_dir "$value"
+    else
+      delete_from_index "$value"
+    fi
+  ;;
+  "commit")
+    if ! [ -s git/index ]; then
+        echo Nothing to commit!
+    else
+      hash=$(make_tree "")
+      if [ "$hash" == "$(head -n 1 git/commits/HEAD)" ]; then
+          echo Nothing to commit!
+      else
+          if cmp -s git/commits/HEAD git/commits/master; then
+            echo "$hash" > git/commits/master
+          else
+            echo Commiting on head detached from master!
+          fi
+          echo "$hash" > git/commits/HEAD
+          commitString=$(printf "%s\n%s" "$hash" "$value")
+          sum=$(get_string_sum "$commitString")
+          echo "$commitString" > git/commits/"$sum"
+          echo Commit "$sum" with text "$value" has been successfully created!
+      fi
+    fi
+  ;;
+  "checkout")
+    if test -f git/commits/"$value" ; then
+      find . ! -wholename './git*' -delete
+      root=$(head -1 git/commits/"$value")
+      echo "$root" > git/commits/HEAD
+      perform_checkout "$root" "."
+      echo "Performed checkout to $value"
+      if [ "$value" != "master" ] && [ "$value" != "HEAD" ]; then
+          echo Commit message: "$(head -2 git/commits/"$value" | tail -1)"
+      fi
+    else
+      echo Commit not found
+    fi
+  ;;
+  "push")
+    if [ "$2" ] && ping -c 1 "$3" &> /dev/null && [ "$4" ]; then
+      scp -r git "$2@$3:$4"
+    else
+      echo Wrong parameters or server is not available
+      echo -e "List of required parameters:\n1.user\n2.host\n3.dirname"
+    fi
+  ;;
+  "status")
+    touch git/tmpindex
+
+    while IFS= read -r -d '' filepath
+    do
+      echo "$filepath:$(get_divided_path "$(get_file_sum "$filepath")")" | cut -b 3- >> git/tmpindex
+    done < <(find . -type f ! -wholename './git*' -print0)
+
+    sort -o git/index git/index
+    sort -o git/tmpindex git/tmpindex
+
+    while read -r blob
+    do
+      filename="$(echo "$blob" | awk '{split($0,a,":"); print a[1]}')"
+      if grep -q ^"$filename" git/index ; then
+          echo -e "${yellowColor}Modified: $filename"
+      else
+          echo -e "${redColor}Untracked: $filename"
+
+      fi
+    done < <(comm -13 git/index git/tmpindex)
+
+
+    while read -r blob
+    do
+      filename="$(echo "$blob" | awk '{split($0,a,":"); print a[1]}')"
+      if ! grep -q ^"$filename" git/tmpindex ; then
+        echo -e "${redColor}Deleted: $filename"
+      fi
+    done < <(comm -23 git/index git/tmpindex)
+    rm git/tmpindex
+  ;;
+  "diff")
+    mkdir git/tmp1 git/tmp2
+    if [ "$2" ] && [ "$3" ]; then
+      if test -f git/commits/"$2" && test -f git/commits/"$3"; then
+        perform_checkout "$(head -1 git/commits/"$2")" "git/tmp1"
+        perform_checkout "$(head -1 git/commits/"$3")" "git/tmp2"
+        get_diff "git/tmp1" "git/tmp2"
+      else
+        echo Incorrect commits, list of available commits:
+        ls git/commits
+      fi
+    else
+      perform_checkout "$(head -1 git/commits/HEAD)" "git/tmp1"
+
+      get_diff "." "git/tmp1"
+    fi
+    rm -rf git/tmp1 > /dev/null
+    rm -rf git/tmp2 > /dev/null
+  ;;
+  *)
+    echo "Неизвестная команда, список доступных комманд: init add commit checkout push status diff"
+  ;;
+esac
