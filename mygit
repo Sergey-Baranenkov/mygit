@@ -2,11 +2,11 @@ redColor='\e[1;31m'
 yellowColor='\e[1;32m'
 
 get_string_sum(){
-  echo "$1" | md5sum | awk '{print $1}'
+  echo "$1" | sha1sum | awk '{print $1}'
 }
 
 get_file_sum(){
-  md5sum "$1" | awk '{print $1}'
+  sha1sum "$1" | awk '{print $1}'
 }
 
 
