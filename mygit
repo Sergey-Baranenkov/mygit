@@ -232,6 +232,6 @@ case $key in
     rm -rf git/tmp2 > /dev/null
   ;;
   *)
-    echo "Неизвестная команда, список доступных комманд: init add commit checkout push status diff"
+    echo "Неизвестная команда, список доступных команд: init add commit checkout push status diff"
   ;;
 esac
